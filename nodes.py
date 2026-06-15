@@ -221,33 +221,33 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 io.Latent.Input("latent", tooltip="The main video latent container from your sampler/empty latent node. This defines the target video length, width, and height."),
                 
                 # MSR Inputs & Settings
-                io.Int.Input("msr_width", default=736, min=32, max=8192, step=32, tooltip="Width to resize all MSR (Multi-Subject Reference) images to before encoding them. Usually set to match your target video width."),
-                io.Int.Input("msr_height", default=1280, min=32, max=8192, step=32, tooltip="Height to resize all MSR (Multi-Subject Reference) images to before encoding them. Usually set to match your target video height."),
-                io.Combo.Input("msr_frame_count", options=["17", "25", "33", "41"], default="17", tooltip="The total number of frames in the generated MSR sequence. The input images will be duplicated evenly to fill this length."),
+                io.Int.Input("msr_width", default=1920, min=32, max=8192, step=32, tooltip="Width to resize all MSR (Multi-Subject Reference) images to before encoding them. Usually set to match your target video width."),
+                io.Int.Input("msr_height", default=1088, min=32, max=8192, step=32, tooltip="Height to resize all MSR (Multi-Subject Reference) images to before encoding them. Usually set to match your target video height."),
+                io.Combo.Input("msr_frame_count", options=["17", "25", "33", "41"], default="41", tooltip="The total number of frames in the generated MSR sequence. The input images will be duplicated evenly to fill this length."),
                 io.Image.Input("msr_image_1", optional=True, tooltip="The first reference image of your subject. Will be placed at the start of the MSR sequence."),
                 io.Image.Input("msr_image_2", optional=True, tooltip="The second reference image of your subject (optional). Allows conditioning on different angles or states."),
                 io.Image.Input("msr_image_3", optional=True, tooltip="The third reference image of your subject (optional)."),
                 io.Image.Input("msr_image_4", optional=True, tooltip="The fourth reference image of your subject (optional)."),
                 io.Image.Input("msr_background", optional=True, tooltip="Optional background reference image. If provided, it is placed at the end of the MSR sequence to guide the background style."),
-                io.Float.Input("msr_strength", default=1.0, min=0.0, max=1.0, step=0.01, tooltip="The injection strength of MSR latents directly into the latent space (0.0 = none, 1.0 = maximum). Controls how strongly the subject features are forced into the latent pixels."),
+                io.Float.Input("msr_strength", default=0.90, min=0.0, max=1.0, step=0.01, tooltip="The injection strength of MSR latents directly into the latent space (0.0 = none, 1.0 = maximum). Controls how strongly the subject features are forced into the latent pixels."),
                 io.Float.Input("msr_attention_strength", default=1.0, min=0.0, max=1.0, step=0.01, tooltip="How strongly the generator's cross-attention is guided by the MSR sequence. Higher values make the model pay more attention to the subject references."),
                 
                 # First Frame Inputs & Settings
                 io.Image.Input("first_frame", optional=True, tooltip="The starting image of your video. Used to establish the exact beginning of the video sequence."),
-                io.Boolean.Input("lock_first_frame", default=False, tooltip="If enabled, freezes the first frame's latents to force the video to start exactly with your first_frame image, preventing any modification by the sampler."),
-                io.Int.Input("lock_first_frame_len", default=2, min=1, max=16, step=1, tooltip="The number of latent frames to freeze (1 latent frame = 8 pixel frames in LTXV). Set to 2 or more to prevent the second frame from being blurry due to VAE block interpolation."),
-                io.Float.Input("first_frame_strength", default=1.0, min=0.0, max=1.0, step=0.01, tooltip="The direct latent injection strength of the first frame (0.0 = none, 1.0 = maximum). Controls how closely the starting frames resemble the input image."),
-                io.Float.Input("first_frame_attention_strength", default=1.0, min=0.0, max=1.0, step=0.01, tooltip="How strongly the generator pays attention to the first frame image during the entire video generation via cross-attention."),
+                io.Boolean.Input("lock_first_frame", default=True, tooltip="If enabled, freezes the first frame's latents to force the video to start exactly with your first_frame image, preventing any modification by the sampler."),
+                io.Int.Input("lock_first_frame_len", default=1, min=1, max=16, step=1, tooltip="The number of latent frames to freeze (1 latent frame = 8 pixel frames in LTXV). Set to 2 or more to prevent the second frame from being blurry due to VAE block interpolation."),
+                io.Float.Input("first_frame_strength", default=0.85, min=0.0, max=1.0, step=0.01, tooltip="The direct latent injection strength of the first frame (0.0 = none, 1.0 = maximum). Controls how closely the starting frames resemble the input image."),
+                io.Float.Input("first_frame_attention_strength", default=0.90, min=0.0, max=1.0, step=0.01, tooltip="How strongly the generator pays attention to the first frame image during the entire video generation via cross-attention."),
                 
                 # Last Frame Inputs & Settings
                 io.Image.Input("last_frame", optional=True, tooltip="The ending image of your video. Used to establish a specific end point for the motion sequence."),
-                io.Boolean.Input("lock_last_frame", default=False, tooltip="If enabled, freezes the last frame's latents to force the video to end exactly on your last_frame image."),
-                io.Float.Input("last_frame_strength", default=1.0, min=0.0, max=1.0, step=0.01, tooltip="The direct latent injection strength of the last frame (0.0 = none, 1.0 = maximum). Controls how closely the final frames resemble the input image."),
-                io.Float.Input("last_frame_attention_strength", default=1.0, min=0.0, max=1.0, step=0.01, tooltip="How strongly the generator pays attention to the last frame image during the entire video generation via cross-attention."),
+                io.Boolean.Input("lock_last_frame", default=True, tooltip="If enabled, freezes the last frame's latents to force the video to end exactly on your last_frame image."),
+                io.Float.Input("last_frame_strength", default=0.85, min=0.0, max=1.0, step=0.01, tooltip="The direct latent injection strength of the last frame (0.0 = none, 1.0 = maximum). Controls how closely the final frames resemble the input image."),
+                io.Float.Input("last_frame_attention_strength", default=0.90, min=0.0, max=1.0, step=0.01, tooltip="How strongly the generator pays attention to the last frame image during the entire video generation via cross-attention."),
                 
                 # IC-LoRA General Settings
                 io.Float.Input("latent_downscale_factor", default=1.0, min=1.0, max=10.0, step=1.0, tooltip="The downscaling factor applied to the reference latents before injection. Set to 1.0 for normal, or 2.0 to match downscaled/compressed IC-LoRA resolutions."),
-                io.Combo.Input("crop", options=["disabled", "center"], default="disabled", tooltip="How to resize images to the target resolution. 'disabled' stretches/squishes the image directly; 'center' crops to maintain the original aspect ratio."),
+                io.Combo.Input("crop", options=["disabled", "center"], default="center", tooltip="How to resize images to the target resolution. 'disabled' stretches/squishes the image directly; 'center' crops to maintain the original aspect ratio."),
                 io.Boolean.Input("use_tiled_encode", default=False, tooltip="Enables tiled VAE encoding. Strongly recommended for high resolutions to prevent running out of GPU memory (OOM)."),
                 io.Int.Input("tile_size", default=256, min=64, max=512, step=32, tooltip="Size of individual pixel tiles used during tiled encoding. Smaller sizes use less VRAM but take slightly longer to process."),
                 io.Int.Input("tile_overlap", default=64, min=16, max=256, step=16, tooltip="Overlap between adjacent tiles in pixels. Keeps transitions smooth and prevents visible seams or boundary lines in encoded images."),
