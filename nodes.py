@@ -251,7 +251,11 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 io.Boolean.Input("use_tiled_encode", default=False, tooltip="Enables tiled VAE encoding. Strongly recommended for high resolutions to prevent running out of GPU memory (OOM)."),
                 io.Int.Input("tile_size", default=256, min=64, max=512, step=32, tooltip="Size of individual pixel tiles used during tiled encoding. Smaller sizes use less VRAM but take slightly longer to process."),
                 io.Int.Input("tile_overlap", default=64, min=16, max=256, step=16, tooltip="Overlap between adjacent tiles in pixels. Keeps transitions smooth and prevents visible seams or boundary lines in encoded images."),
-                io.Mask.Input("attention_mask", optional=True, tooltip="An optional black and white mask to limit IC-LoRA attention influence to specific spatial areas (e.g. only focusing on the subject, ignoring background)."),
+                
+                # Masks
+                io.Mask.Input("msr_mask", optional=True, tooltip="An optional black and white mask to limit MSR IC-LoRA attention influence to specific spatial areas (e.g. only focusing on the subject)."),
+                io.Mask.Input("first_frame_mask", optional=True, tooltip="An optional black and white mask to limit First Frame IC-LoRA attention influence to specific spatial areas."),
+                io.Mask.Input("last_frame_mask", optional=True, tooltip="An optional black and white mask to limit Last Frame IC-LoRA attention influence to specific spatial areas."),
             ],
             outputs=[
                 io.Conditioning.Output("positive"),
@@ -291,7 +295,9 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
         use_tiled_encode=False,
         tile_size=256,
         tile_overlap=64,
-        attention_mask=None,
+        msr_mask=None,
+        first_frame_mask=None,
+        last_frame_mask=None,
     ) -> io.NodeOutput:
         
         # Deferred import of LTX-Video helpers (avoids alphabet loading issues)
@@ -313,16 +319,22 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
 
         _, _, latent_length, latent_height, latent_width = latent_image.shape
         time_scale_factor = scale_factors[0]
-        norm_mask = iclora_attention.normalize_mask(attention_mask) if attention_mask is not None else None
+        
+        norm_msr_mask = iclora_attention.normalize_mask(msr_mask) if msr_mask is not None else None
+        norm_ff_mask = iclora_attention.normalize_mask(first_frame_mask) if first_frame_mask is not None else None
+        norm_lf_mask = iclora_attention.normalize_mask(last_frame_mask) if last_frame_mask is not None else None
+
+        # --- Variables to store guide latents for inplace locking in Step 4 ---
+        ff_guide_latent_ref = None
+        lf_guide_latent_ref = None
+        lf_latent_idx_ref = None
+        lf_guide_len_ref = None
 
         # --- STEP 1: APPLY FIRST FRAME (FL) ---
         if first_frame is not None:
-            num_frames_to_keep = ((first_frame.shape[0] - 1) // time_scale_factor) * time_scale_factor + 1
-            causal_fix = (num_frames_to_keep == 1)
+            causal_fix = True # Always True for index 0
             
             ff_image = first_frame
-            if not causal_fix:
-                ff_image = torch.cat([ff_image[:1], ff_image], dim=0)
 
             # Use base encode from standard iclora
             ff_image, ff_guide_latent = iclora_mod.LTXAddVideoICLoRAGuide.encode(
@@ -330,10 +342,6 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 scale_factors=scale_factors, latent_downscale_factor=latent_downscale_factor,
                 crop=crop, use_tiled_encode=use_tiled_encode, tile_size=tile_size, tile_overlap=tile_overlap
             )
-
-            if not causal_fix:
-                ff_guide_latent = ff_guide_latent[:, :, 1:, :, :]
-                ff_image = ff_image[1:]
 
             ff_guide_orig_shape = list(ff_guide_latent.shape[2:])
             ff_guide_mask = None
@@ -348,7 +356,9 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 ff_guide_latent = dilated["samples"]
 
             ff_tokens_added = ff_guide_latent.shape[2] * ff_guide_latent.shape[3] * ff_guide_latent.shape[4]
-            ff_guide_len = ff_guide_latent.shape[2]
+            
+            # Store reference for lock
+            ff_guide_latent_ref = ff_guide_latent
 
             # Register standard keyframe
             positive, negative, latent_image, noise_mask = nodes_lt.LTXVAddGuide.append_keyframe(
@@ -356,22 +366,14 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 first_frame_strength, scale_factors, guide_mask=ff_guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=causal_fix
             )
 
-            # Robust inplace multi-frame lock
-            if lock_first_frame:
-                for i in range(lock_first_frame_len):
-                    if i < latent_length:
-                        g_frame = min(i, ff_guide_latent.shape[2] - 1)
-                        latent_image[:, :, i:i+1] = ff_guide_latent[:, :, g_frame:g_frame+1]
-                        noise_mask[:, :, i:i+1] = 0.0
-
             # Register cross-attention conditionings
             positive = iclora_attention.append_guide_attention_entry(
                 positive, ff_tokens_added, ff_guide_orig_shape,
-                attention_strength=first_frame_attention_strength, attention_mask=norm_mask
+                attention_strength=first_frame_attention_strength, attention_mask=norm_ff_mask
             )
             negative = iclora_attention.append_guide_attention_entry(
                 negative, ff_tokens_added, ff_guide_orig_shape,
-                attention_strength=first_frame_attention_strength, attention_mask=norm_mask
+                attention_strength=first_frame_attention_strength, attention_mask=norm_ff_mask
             )
 
         # --- STEP 2: APPLY MSR (MULTI-SUBJECT REFERENCE) ---
@@ -406,18 +408,13 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
             num_frames_to_keep = ((msr_video.shape[0] - 1) // time_scale_factor) * time_scale_factor + 1
             msr_video = msr_video[:num_frames_to_keep]
             
-            causal_fix = (num_frames_to_keep == 1)
-            if not causal_fix:
-                msr_video = torch.cat([msr_video[:1], msr_video], dim=0)
+            causal_fix = True # Always True for index 0
 
             msr_image_out, msr_guide_latent = iclora_mod.LTXAddVideoICLoRAGuide.encode(
                 vae=vae, latent_width=latent_width, latent_height=latent_height, images=msr_video,
                 scale_factors=scale_factors, latent_downscale_factor=latent_downscale_factor,
                 crop=crop, use_tiled_encode=use_tiled_encode, tile_size=tile_size, tile_overlap=tile_overlap
             )
-
-            if not causal_fix:
-                msr_guide_latent = msr_guide_latent[:, :, 1:, :, :]
 
             msr_guide_orig_shape = list(msr_guide_latent.shape[2:])
             msr_guide_mask = None
@@ -430,6 +427,18 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 )[0]
                 msr_guide_mask = dilated["noise_mask"]
                 msr_guide_latent = dilated["samples"]
+                
+            # TEMPORAL MASKING to protect 0-th frame
+            msr_frames = msr_guide_latent.shape[2]
+            B, _, _, H, W = msr_guide_latent.shape
+            temp_mask = torch.ones((B, 1, msr_frames, H, W), dtype=torch.float32, device=msr_guide_latent.device)
+            if msr_frames > 0:
+                temp_mask[:, :, 0, :, :] = 0.0 # Protect 0-th frame from MSR overwrite
+            
+            if msr_guide_mask is not None:
+                msr_guide_mask = msr_guide_mask * temp_mask
+            else:
+                msr_guide_mask = temp_mask
 
             msr_tokens_added = msr_guide_latent.shape[2] * msr_guide_latent.shape[3] * msr_guide_latent.shape[4]
 
@@ -442,11 +451,11 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
             # Register MSR attention
             positive = iclora_attention.append_guide_attention_entry(
                 positive, msr_tokens_added, msr_guide_orig_shape,
-                attention_strength=msr_attention_strength, attention_mask=norm_mask
+                attention_strength=msr_attention_strength, attention_mask=norm_msr_mask
             )
             negative = iclora_attention.append_guide_attention_entry(
                 negative, msr_tokens_added, msr_guide_orig_shape,
-                attention_strength=msr_attention_strength, attention_mask=norm_mask
+                attention_strength=msr_attention_strength, attention_mask=norm_msr_mask
             )
 
         # --- STEP 3: APPLY LAST FRAME (LF) ---
@@ -488,6 +497,11 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
             lf_calculated_frame_idx = lf_latent_idx * time_scale_factor
 
             assert lf_latent_idx >= 0, "Last frame index is out of bounds."
+            
+            # Store reference for lock
+            lf_guide_latent_ref = lf_guide_latent
+            lf_latent_idx_ref = lf_latent_idx
+            lf_guide_len_ref = lf_guide_len
 
             # Injects keyframe conditionings
             positive, negative, latent_image, noise_mask = nodes_lt.LTXVAddGuide.append_keyframe(
@@ -495,20 +509,28 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 last_frame_strength, scale_factors, guide_mask=lf_guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=causal_fix
             )
 
-            # Inplace lock for the last frame
-            if lock_last_frame:
-                lf_end_idx = min(lf_latent_idx + lf_guide_len, latent_length)
-                latent_image[:, :, lf_latent_idx:lf_end_idx] = lf_guide_latent[:, :, :lf_end_idx - lf_latent_idx]
-                noise_mask[:, :, lf_latent_idx:lf_end_idx] = 0.0
-
             # Register attention
             positive = iclora_attention.append_guide_attention_entry(
                 positive, lf_tokens_added, lf_guide_orig_shape,
-                attention_strength=last_frame_attention_strength, attention_mask=norm_mask
+                attention_strength=last_frame_attention_strength, attention_mask=norm_lf_mask
             )
             negative = iclora_attention.append_guide_attention_entry(
                 negative, lf_tokens_added, lf_guide_orig_shape,
-                attention_strength=last_frame_attention_strength, attention_mask=norm_mask
+                attention_strength=last_frame_attention_strength, attention_mask=norm_lf_mask
             )
+
+        # --- STEP 4: APPLY INPLACE LOCKS ---
+        # This ensures MSR or any other modifications don't overwrite the locked First/Last frames
+        if first_frame is not None and lock_first_frame and ff_guide_latent_ref is not None:
+            for i in range(lock_first_frame_len):
+                if i < latent_length:
+                    g_frame = min(i, ff_guide_latent_ref.shape[2] - 1)
+                    latent_image[:, :, i:i+1] = ff_guide_latent_ref[:, :, g_frame:g_frame+1]
+                    noise_mask[:, :, i:i+1] = 0.0
+
+        if last_frame is not None and lock_last_frame and lf_guide_latent_ref is not None:
+            lf_end_idx = min(lf_latent_idx_ref + lf_guide_len_ref, latent_length)
+            latent_image[:, :, lf_latent_idx_ref:lf_end_idx] = lf_guide_latent_ref[:, :, :lf_end_idx - lf_latent_idx_ref]
+            noise_mask[:, :, lf_latent_idx_ref:lf_end_idx] = 0.0
 
         return io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask})

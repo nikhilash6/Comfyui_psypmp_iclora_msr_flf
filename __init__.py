@@ -1,5 +1,7 @@
 from .nodes import LTXMSRICLoRAFLF
 
+__version__ = "0.9.3"
+
 NODE_CLASS_MAPPINGS = {
     "LTXMSRICLoRAFLF": LTXMSRICLoRAFLF
 }
