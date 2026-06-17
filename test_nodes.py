@@ -12,20 +12,16 @@ def _get_ltx_module(module_name):
     import importlib
     from pathlib import Path
 
-    # Find custom_nodes directory from our own folder path
     current_file_path = Path(__file__).resolve()
     custom_nodes_dir = current_file_path.parent.parent
 
-    # Find the LTXVideo folder with high priority exact matches
     ltx_video_dir = None
     
-    # Priority 1: Exact match (preferred)
     for p in custom_nodes_dir.iterdir():
         if p.is_dir() and p.name in ("ComfyUI-LTXVideo", "ComfyUI_LTXVideo"):
             ltx_video_dir = p
             break
             
-    # Priority 2: Substring matches (ignoring alternative modules like AVSplit)
     if ltx_video_dir is None:
         for p in custom_nodes_dir.iterdir():
             if p.is_dir() and ("ComfyUI-LTXVideo" in p.name or "ComfyUI_LTXVideo" in p.name):
@@ -33,7 +29,6 @@ def _get_ltx_module(module_name):
                     ltx_video_dir = p
                     break
 
-    # Priority 3: Fallback search in sys.path
     if ltx_video_dir is None:
         for p_str in sys.path:
             p = Path(p_str)
@@ -51,7 +46,6 @@ def _get_ltx_module(module_name):
     ltx_dir_str = str(ltx_video_dir)
     pkg_name = ltx_video_dir.name
 
-    # If the parent directory (custom_nodes) is not in sys.path, add it briefly
     custom_nodes_str = str(custom_nodes_dir)
     added_to_sys_path = False
     if custom_nodes_str not in sys.path:
@@ -59,7 +53,6 @@ def _get_ltx_module(module_name):
         added_to_sys_path = True
 
     try:
-        # Import it as a sub-module of the package
         full_module_name = f"{pkg_name}.{module_name}"
         if full_module_name in sys.modules:
             return sys.modules[full_module_name]
@@ -68,139 +61,6 @@ def _get_ltx_module(module_name):
     finally:
         if added_to_sys_path:
             sys.path.remove(custom_nodes_str)
-
-# =====================================================================
-# STANDALONE HELPER FUNCTIONS (No dependency on ComfyUI-LTXVideo)
-# =====================================================================
-def normalize_mask(mask):
-    """Normalize a ComfyUI MASK to (1, 1, F, H, W) for downstream processing.
-    ComfyUI MASK type is typically (B, H, W) or (H, W).
-    """
-    if mask is None:
-        return None
-    if mask.dim() == 2:  # (H, W) -> single frame
-        return mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-    elif mask.dim() == 3:  # (F, H, W) -> video mask
-        return mask.unsqueeze(0).unsqueeze(0)
-    return mask
-
-
-def _get_guide_attention_entries(conditioning):
-    """Read the current guide_attention_entries list from conditioning."""
-    for t in conditioning:
-        entries = t[1].get("guide_attention_entries", None)
-        if entries is not None:
-            return entries
-    return []
-
-
-def _set_guide_attention_entries(conditioning, entries):
-    """Write guide_attention_entries into conditioning (immutable update)."""
-    import node_helpers
-    return node_helpers.conditioning_set_values(
-        conditioning, {"guide_attention_entries": entries}
-    )
-
-
-def append_guide_attention_entry(
-    conditioning,
-    pre_filter_count,
-    latent_shape,
-    attention_strength=1.0,
-    attention_mask=None,
-):
-    """Append a new guide attention entry to conditioning metadata."""
-    existing_entries = _get_guide_attention_entries(conditioning)
-    entries = [*existing_entries]
-    entries.append(
-        {
-            "pre_filter_count": pre_filter_count,
-            "strength": attention_strength,
-            "pixel_mask": attention_mask,
-            "latent_shape": latent_shape,
-        }
-    )
-    return _set_guide_attention_entries(conditioning, entries)
-
-
-def _dilate_latent(samples, scale_factor):
-    """Dilates a latent by a scale factor and returns dilated samples and noise_mask."""
-    if scale_factor == 1.0:
-        return samples, None
-
-    scale_factor = int(scale_factor)
-    dilated_shape = samples.shape[:3] + (
-        samples.shape[3] * scale_factor,
-        samples.shape[4] * scale_factor,
-    )
-
-    dilated_samples = torch.zeros(
-        dilated_shape,
-        device=samples.device,
-        dtype=samples.dtype,
-        requires_grad=False,
-    )
-    dilated_samples[..., ::scale_factor, ::scale_factor] = samples
-
-    dilated_mask_shape = (
-        dilated_samples.shape[0],
-        1,
-        dilated_samples.shape[2],
-        dilated_samples.shape[3],
-        dilated_samples.shape[4],
-    )
-    dilated_mask = torch.full(
-        dilated_mask_shape,
-        -1.0,
-        device=samples.device,
-        dtype=samples.dtype,
-        requires_grad=False,
-    )
-    dilated_mask[..., ::scale_factor, ::scale_factor] = 1.0
-
-    return dilated_samples, dilated_mask
-
-
-def _encode_guide_latent(
-    vae,
-    latent_width,
-    latent_height,
-    images,
-    scale_factors,
-    latent_downscale_factor,
-    crop,
-    use_tiled_encode,
-    tile_size,
-    tile_overlap,
-):
-    """Encodes the guide images into latent space using VAE (with optional tiled encoding and downscaling)."""
-    time_scale_factor, width_scale_factor, height_scale_factor = scale_factors
-    num_frames_to_keep = (
-        (images.shape[0] - 1) // time_scale_factor
-    ) * time_scale_factor + 1
-    images = images[:num_frames_to_keep]
-
-    target_width = int(latent_width * width_scale_factor / latent_downscale_factor)
-    target_height = int(latent_height * height_scale_factor / latent_downscale_factor)
-
-    pixels = comfy.utils.common_upscale(
-        images.movedim(-1, 1),
-        target_width,
-        target_height,
-        "bilinear",
-        crop=crop,
-    ).movedim(1, -1)
-    encode_pixels = pixels[:, :, :, :3]
-    if use_tiled_encode:
-        guide_latent = vae.encode_tiled(
-            encode_pixels,
-            tile_x=tile_size,
-            tile_y=tile_size,
-            overlap=tile_overlap,
-        )
-    else:
-        guide_latent = vae.encode(encode_pixels)
-    return encode_pixels, guide_latent
 
 
 # =====================================================================
@@ -262,59 +122,76 @@ except:
     pass
 
 
-# =====================================================================
-# STANDALONE NODE IMPLEMENTATION WITH USER-FRIENDLY TOOLTIPS
-# =====================================================================
-class LTXMSRICLoRAFLF(io.ComfyNode):
+class LTXMSRICLoRAFLF_Experimental(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="LTXMSRICLoRAFLF",
-            display_name="🅛🅣🅧 MSR IC LORA FLF (Standalone)",
+            node_id="LTXMSRICLoRAFLF_Experimental",
+            display_name="🅛🅣🅧 MSR IC LORA FLF (Test/Experimental)",
             category="Lightricks/IC-LoRA",
-            description="Standalone custom node combining Licon MSR sequence creation and IC-LoRA conditioning for First, Last, and Subject frames.",
+            description="Экспериментальная нода MSR IC-LoRA с индивидуальными масками и переключателями этапов.",
             inputs=[
-                io.Conditioning.Input("positive", tooltip="The positive text conditioning. The reference frames and IC-LoRA attention metadata will be appended to this."),
-                io.Conditioning.Input("negative", tooltip="The negative text conditioning. The reference frames and IC-LoRA attention metadata will be appended to this."),
-                io.Vae.Input("vae", tooltip="The VAE model used to encode your reference images (First Frame, Last Frame, and MSR images) into latent space."),
-                io.Latent.Input("latent", tooltip="The main video latent container from your sampler/empty latent node. This defines the target video length, width, and height."),
+                io.Conditioning.Input("positive", tooltip="Позитивный текстовый промпт. Сюда будут добавлены данные IC-LoRA внимания."),
+                io.Conditioning.Input("negative", tooltip="Негативный текстовый промпт. Сюда будут добавлены данные IC-LoRA внимания."),
+                io.Vae.Input("vae", tooltip="VAE модель для кодирования картинок в латентное пространство."),
+                io.Latent.Input("latent", tooltip="Главный латент видео, который задает длину, ширину и высоту."),
                 
-                # MSR Inputs & Settings
-                io.Int.Input("msr_width", default=1920, min=32, max=8192, step=32, tooltip="Width to resize all MSR (Multi-Subject Reference) images to before encoding them. Usually set to match your target video width."),
-                io.Int.Input("msr_height", default=1088, min=32, max=8192, step=32, tooltip="Height to resize all MSR (Multi-Subject Reference) images to before encoding them. Usually set to match your target video height."),
-                io.Combo.Input("msr_frame_count", options=["17", "25", "33", "41"], default="41", tooltip="The total number of frames in the generated MSR sequence. The input images will be duplicated evenly to fill this length."),
-                io.Image.Input("msr_image_1", optional=True, tooltip="The first reference image of your subject. Will be placed at the start of the MSR sequence."),
-                io.Image.Input("msr_image_2", optional=True, tooltip="The second reference image of your subject (optional). Allows conditioning on different angles or states."),
-                io.Image.Input("msr_image_3", optional=True, tooltip="The third reference image of your subject (optional)."),
-                io.Image.Input("msr_image_4", optional=True, tooltip="The fourth reference image of your subject (optional)."),
-                io.Image.Input("msr_background", optional=True, tooltip="Optional background reference image. If provided, it is placed at the end of the MSR sequence to guide the background style."),
-                io.Float.Input("msr_strength", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="The injection strength of MSR latents directly into the latent space (0.0 = none, 1.0 = maximum). Controls how strongly the subject features are forced into the latent pixels."),
-                io.Float.Input("msr_attention_strength", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="How strongly the generator's cross-attention is guided by the MSR sequence. Higher values make the model pay more attention to the subject references."),
+                # Experimental Toggles
+                io.Boolean.Input("enable_msr_latent_injection", default=True, tooltip="Включить внедрение MSR референсов напрямую в латент нулевого кадра. Выключите, чтобы проверить чистую работу внимания (Cross-Attention)."),
+                io.Boolean.Input("enable_msr_attention", default=True, tooltip="Включить влияние MSR через механизм внимания (Cross-Attention)."),
+
+                # MSR Global Settings
+                io.Int.Input("msr_width", default=1920, min=32, max=8192, step=32, tooltip="Ширина ресайза для MSR изображений."),
+                io.Int.Input("msr_height", default=1088, min=32, max=8192, step=32, tooltip="Высота ресайза для MSR изображений."),
+                io.Combo.Input("msr_frame_count", options=["17", "25", "33", "41"], default="41", tooltip="Общее количество кадров MSR-секвенции. Изображения будут размножены для заполнения этой длины."),
+                io.Float.Input("msr_attention_strength", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Сила влияния MSR секвенции на внимание (Cross-Attention) всей модели."),
+                
+                # MSR Image 1
+                io.Image.Input("msr_image_1", optional=True, tooltip="MSR Референс 1."),
+                io.Mask.Input("msr_mask_1", optional=True, tooltip="Маска для MSR Референса 1 (белое = объект)."),
+                io.Float.Input("msr_strength_1", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Сила инжекта MSR Референса 1 в латент."),
+                
+                # MSR Image 2
+                io.Image.Input("msr_image_2", optional=True, tooltip="MSR Референс 2."),
+                io.Mask.Input("msr_mask_2", optional=True, tooltip="Маска для MSR Референса 2 (белое = объект)."),
+                io.Float.Input("msr_strength_2", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Сила инжекта MSR Референса 2 в латент."),
+
+                # MSR Image 3
+                io.Image.Input("msr_image_3", optional=True, tooltip="MSR Референс 3."),
+                io.Mask.Input("msr_mask_3", optional=True, tooltip="Маска для MSR Референса 3 (белое = объект)."),
+                io.Float.Input("msr_strength_3", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Сила инжекта MSR Референса 3 в латент."),
+
+                # MSR Image 4
+                io.Image.Input("msr_image_4", optional=True, tooltip="MSR Референс 4."),
+                io.Mask.Input("msr_mask_4", optional=True, tooltip="Маска для MSR Референса 4 (белое = объект)."),
+                io.Float.Input("msr_strength_4", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Сила инжекта MSR Референса 4 в латент."),
+
+                # MSR Background
+                io.Image.Input("msr_background", optional=True, tooltip="Фоновый MSR Референс."),
+                io.Mask.Input("msr_background_mask", optional=True, tooltip="Маска для Фонового MSR Референса."),
+                io.Float.Input("msr_background_strength", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Сила инжекта Фонового MSR Референса в латент."),
                 
                 # First Frame Inputs & Settings
-                io.Image.Input("first_frame", optional=True, tooltip="The starting image of your video. Used to establish the exact beginning of the video sequence."),
-                io.Boolean.Input("lock_first_frame", default=False, tooltip="If enabled, freezes the first frame's latents to force the video to start exactly with your first_frame image. Note: Enabling this automatically bypasses MSR latent injection to save compute and prevent latent 'mush' contamination."),
-                io.Int.Input("lock_first_frame_len", default=1, min=1, max=16, step=1, tooltip="The number of latent frames to freeze (1 latent frame = 8 pixel frames in LTXV). Set to 2 or more to prevent the second frame from being blurry due to VAE block interpolation."),
-                io.Float.Input("first_frame_strength", default=0.85, min=0.0, max=1.0, step=0.01, tooltip="The direct latent injection strength of the first frame (0.0 = none, 1.0 = maximum). Controls how closely the starting frames resemble the input image."),
-                io.Float.Input("first_frame_attention_strength", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="How strongly the generator pays attention to the first frame image during the entire video generation via cross-attention."),
+                io.Image.Input("first_frame", optional=True, tooltip="Первый кадр (First Frame)."),
+                io.Mask.Input("first_frame_mask", optional=True, tooltip="Маска внимания для первого кадра."),
+                io.Boolean.Input("lock_first_frame", default=False, tooltip="Заморозить латенты первого кадра, чтобы видео начиналось строго с него."),
+                io.Int.Input("lock_first_frame_len", default=1, min=1, max=16, step=1, tooltip="Сколько латентных кадров первого кадра заморозить."),
+                io.Float.Input("first_frame_strength", default=0.85, min=0.0, max=1.0, step=0.01, tooltip="Сила инжекта первого кадра в латент."),
+                io.Float.Input("first_frame_attention_strength", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Сила внимания на первый кадр (Cross-Attention)."),
                 
                 # Last Frame Inputs & Settings
-                io.Image.Input("last_frame", optional=True, tooltip="The ending image of your video. Used to establish a specific end point for the motion sequence."),
-                io.Boolean.Input("lock_last_frame", default=False, tooltip="If enabled, freezes the last frame's latents to force the video to end exactly on your last_frame image."),
-                io.Float.Input("last_frame_strength", default=0.85, min=0.0, max=1.0, step=0.01, tooltip="The direct latent injection strength of the last frame (0.0 = none, 1.0 = maximum). Controls how closely the final frames resemble the input image."),
-                io.Float.Input("last_frame_attention_strength", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="How strongly the generator pays attention to the last frame image during the entire video generation via cross-attention."),
+                io.Image.Input("last_frame", optional=True, tooltip="Последний кадр (Last Frame)."),
+                io.Mask.Input("last_frame_mask", optional=True, tooltip="Маска внимания для последнего кадра."),
+                io.Boolean.Input("lock_last_frame", default=False, tooltip="Заморозить латенты последнего кадра."),
+                io.Float.Input("last_frame_strength", default=0.85, min=0.0, max=1.0, step=0.01, tooltip="Сила инжекта последнего кадра в латент."),
+                io.Float.Input("last_frame_attention_strength", default=1.00, min=0.0, max=1.0, step=0.01, tooltip="Сила внимания на последний кадр (Cross-Attention)."),
                 
                 # IC-LoRA General Settings
-                io.Float.Input("latent_downscale_factor", default=1.0, min=1.0, max=10.0, step=1.0, tooltip="The downscaling factor applied to the reference latents before injection. Set to 1.0 for normal, or 2.0 to match downscaled/compressed IC-LoRA resolutions."),
-                io.Combo.Input("crop", options=["disabled", "center"], default="center", tooltip="How to resize images to the target resolution. 'disabled' stretches/squishes the image directly; 'center' crops to maintain the original aspect ratio."),
-                io.Boolean.Input("use_tiled_encode", default=False, tooltip="Enables tiled VAE encoding. Strongly recommended for high resolutions to prevent running out of GPU memory (OOM)."),
-                io.Int.Input("tile_size", default=256, min=64, max=512, step=32, tooltip="Size of individual pixel tiles used during tiled encoding. Smaller sizes use less VRAM but take slightly longer to process."),
-                io.Int.Input("tile_overlap", default=64, min=16, max=256, step=16, tooltip="Overlap between adjacent tiles in pixels. Keeps transitions smooth and prevents visible seams or boundary lines in encoded images."),
-                
-                # Masks
-                io.Mask.Input("msr_mask", optional=True, tooltip="An optional black and white mask to limit MSR IC-LoRA attention influence to specific spatial areas (e.g. only focusing on the subject)."),
-                io.Mask.Input("first_frame_mask", optional=True, tooltip="An optional black and white mask to limit First Frame IC-LoRA attention influence to specific spatial areas."),
-                io.Mask.Input("last_frame_mask", optional=True, tooltip="An optional black and white mask to limit Last Frame IC-LoRA attention influence to specific spatial areas."),
+                io.Float.Input("latent_downscale_factor", default=1.0, min=1.0, max=10.0, step=1.0, tooltip="Фактор уменьшения латентов (downscale). 1.0 = обычный, 2.0 = сжатый IC-LoRA."),
+                io.Combo.Input("crop", options=["disabled", "center"], default="center", tooltip="Тип кропа при ресайзе. center = сохраняет пропорции и обрезает края."),
+                io.Boolean.Input("use_tiled_encode", default=False, tooltip="Использовать Tiled VAE (рекомендуется для предотвращения OOM)."),
+                io.Int.Input("tile_size", default=256, min=64, max=512, step=32, tooltip="Размер тайла при Tiled Encode."),
+                io.Int.Input("tile_overlap", default=64, min=16, max=256, step=16, tooltip="Перекрытие тайлов при Tiled Encode."),
             ],
             outputs=[
                 io.Conditioning.Output("positive"),
@@ -330,36 +207,30 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
         negative,
         vae,
         latent,
+        enable_msr_latent_injection,
+        enable_msr_attention,
         msr_width,
         msr_height,
         msr_frame_count,
-        msr_image_1=None,
-        msr_image_2=None,
-        msr_image_3=None,
-        msr_image_4=None,
-        msr_background=None,
-        msr_strength=1.00,
+        msr_image_1=None, msr_mask_1=None, msr_strength_1=1.00,
+        msr_image_2=None, msr_mask_2=None, msr_strength_2=1.00,
+        msr_image_3=None, msr_mask_3=None, msr_strength_3=1.00,
+        msr_image_4=None, msr_mask_4=None, msr_strength_4=1.00,
+        msr_background=None, msr_background_mask=None, msr_background_strength=1.00,
         msr_attention_strength=1.00,
-        first_frame=None,
-        lock_first_frame=False,
-        lock_first_frame_len=1,
-        first_frame_strength=0.85,
-        first_frame_attention_strength=1.00,
-        last_frame=None,
+        first_frame=None, first_frame_mask=None,
+        lock_first_frame=False, lock_first_frame_len=1,
+        first_frame_strength=0.85, first_frame_attention_strength=1.00,
+        last_frame=None, last_frame_mask=None,
         lock_last_frame=False,
-        last_frame_strength=0.85,
-        last_frame_attention_strength=1.00,
+        last_frame_strength=0.85, last_frame_attention_strength=1.00,
         latent_downscale_factor=1.0,
         crop="center",
         use_tiled_encode=False,
         tile_size=256,
         tile_overlap=64,
-        msr_mask=None,
-        first_frame_mask=None,
-        last_frame_mask=None,
     ) -> io.NodeOutput:
         
-        # Deferred import of LTX-Video helpers (avoids alphabet loading issues)
         iclora_attention = _get_ltx_module("iclora_attention")
         latents_mod = _get_ltx_module("latents")
         iclora_mod = _get_ltx_module("iclora")
@@ -368,7 +239,6 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
         scale_factors = vae.downscale_index_formula
         latent_image = latent["samples"].clone()
         
-        # Extract or initialize noise mask
         noise_mask = nodes_lt.get_noise_mask(latent)
         if noise_mask is None:
             b, _, l_len, l_h, l_w = latent_image.shape
@@ -380,11 +250,9 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
         time_scale_factor = scale_factors[0]
         num_appended = 0
         
-        norm_msr_mask = iclora_attention.normalize_mask(msr_mask) if msr_mask is not None else None
         norm_ff_mask = iclora_attention.normalize_mask(first_frame_mask) if first_frame_mask is not None else None
         norm_lf_mask = iclora_attention.normalize_mask(last_frame_mask) if last_frame_mask is not None else None
 
-        # --- Variables to store guide latents for inplace locking in Step 5 ---
         ff_guide_latent_ref = None
         lf_guide_latent_ref = None
         lf_latent_idx_ref = None
@@ -392,11 +260,9 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
 
         # --- STEP 1: APPLY FIRST FRAME (FL) ---
         if first_frame is not None:
-            causal_fix = True # Always True for index 0
-            
+            causal_fix = True 
             ff_image = first_frame
 
-            # Use base encode from standard iclora
             ff_image, ff_guide_latent = iclora_mod.LTXAddVideoICLoRAGuide.encode(
                 vae=vae, latent_width=latent_width, latent_height=latent_height, images=ff_image,
                 scale_factors=scale_factors, latent_downscale_factor=latent_downscale_factor,
@@ -416,18 +282,14 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 ff_guide_latent = dilated["samples"]
 
             ff_tokens_added = ff_guide_latent.shape[2] * ff_guide_latent.shape[3] * ff_guide_latent.shape[4]
-            
-            # Store reference for lock
             ff_guide_latent_ref = ff_guide_latent
 
-            # Register standard keyframe
             positive, negative, latent_image, noise_mask = nodes_lt.LTXVAddGuide.append_keyframe(
                 positive, negative, 0, latent_image, noise_mask, ff_guide_latent,
                 first_frame_strength, scale_factors, guide_mask=ff_guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=causal_fix
             )
             num_appended += ff_guide_latent.shape[2]
 
-            # Register cross-attention conditionings
             positive = iclora_attention.append_guide_attention_entry(
                 positive, ff_tokens_added, ff_guide_orig_shape,
                 attention_strength=first_frame_attention_strength, attention_mask=norm_ff_mask
@@ -438,20 +300,22 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
             )
 
         # --- PREPARE MSR IMAGES ---
-        msr_images = []
-        for img in [msr_image_1, msr_image_2, msr_image_3, msr_image_4]:
+        msr_data = []
+        for img, mask, strength in [
+            (msr_image_1, msr_mask_1, msr_strength_1),
+            (msr_image_2, msr_mask_2, msr_strength_2),
+            (msr_image_3, msr_mask_3, msr_strength_3),
+            (msr_image_4, msr_mask_4, msr_strength_4),
+            (msr_background, msr_background_mask, msr_background_strength),
+        ]:
             if img is not None:
-                msr_images.append(img)
-        if msr_background is not None:
-            msr_images.append(msr_background)
+                msr_data.append({"image": img, "mask": mask, "strength": strength})
 
         # --- STEP 2: MULTI-GUIDE LATENT INJECTION (MSR CHAIN 1) ---
-        # Inject individual MSR images into latent at frame_idx=0 (similar to LTXVAddGuideMulti)
-        skip_msr_latent_injection = (first_frame is not None and lock_first_frame)
-        if len(msr_images) > 0 and not skip_msr_latent_injection:
-            for i, img in enumerate(msr_images):
+        if enable_msr_latent_injection and len(msr_data) > 0:
+            for item in msr_data:
                 img_encoded, guide_latent = iclora_mod.LTXAddVideoICLoRAGuide.encode(
-                    vae=vae, latent_width=latent_width, latent_height=latent_height, images=img,
+                    vae=vae, latent_width=latent_width, latent_height=latent_height, images=item["image"],
                     scale_factors=scale_factors, latent_downscale_factor=latent_downscale_factor,
                     crop=crop, use_tiled_encode=use_tiled_encode, tile_size=tile_size, tile_overlap=tile_overlap
                 )
@@ -468,35 +332,61 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
 
                 positive, negative, latent_image, noise_mask = nodes_lt.LTXVAddGuide.append_keyframe(
                     positive, negative, 0, latent_image, noise_mask, guide_latent,
-                    msr_strength, scale_factors, guide_mask=guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=True
+                    item["strength"], scale_factors, guide_mask=guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=True
                 )
                 num_appended += guide_latent.shape[2]
 
         # --- STEP 3: MSR VIDEO CONDITIONING (MSR CHAIN 2) ---
-        # Package MSR images into a video sequence and add attention entries to conditioning
-        if len(msr_images) > 0:
+        if enable_msr_attention and len(msr_data) > 0:
             fc = int(msr_frame_count)
-            # 3.1 Resize using comfy.utils.common_upscale
             resized_images = []
-            for img in msr_images:
-                resized = comfy.utils.common_upscale(
+            resized_masks = []
+            
+            for item in msr_data:
+                img = item["image"]
+                mask = item["mask"]
+                
+                # Resize image
+                resized_img = comfy.utils.common_upscale(
                     img.movedim(-1, 1), msr_width, msr_height, "bilinear", crop=crop
                 ).movedim(1, -1)
-                resized_images.append(resized)
+                resized_images.append(resized_img)
+                
+                # Resize mask
+                if mask is not None:
+                    if mask.dim() == 2:
+                        mask = mask.unsqueeze(0) # (1, H, W)
+                    mask_tensor = mask.unsqueeze(0).unsqueeze(0) # (1, 1, 1, H, W)
+                    
+                    # common_upscale requires (B, C, H, W)
+                    # We pass (1, 1, H, W)
+                    mask_upscale_target = mask_tensor.squeeze(2) # (1, 1, H, W)
+                    resized_m = comfy.utils.common_upscale(
+                        mask_upscale_target, msr_width, msr_height, "bilinear", crop=crop
+                    ) # (1, 1, H_new, W_new)
+                    resized_m = resized_m.unsqueeze(2) # (1, 1, 1, H_new, W_new)
+                    resized_masks.append(resized_m)
+                else:
+                    white_mask = torch.ones((1, 1, 1, msr_height, msr_width), dtype=torch.float32, device=img.device)
+                    resized_masks.append(white_mask)
 
-            # 3.2 Expand to MSR sequence
             base_count = fc // len(resized_images)
             remainder = fc % len(resized_images)
             msr_sequence_frames = []
-            for index, img_tensor in enumerate(resized_images):
+            msr_sequence_masks = []
+            
+            for index, (img_tensor, mask_tensor) in enumerate(zip(resized_images, resized_masks)):
                 repeats = base_count + (1 if index < remainder else 0)
                 for _ in range(repeats):
                     msr_sequence_frames.append(img_tensor)
+                    msr_sequence_masks.append(mask_tensor)
             
             msr_video = torch.cat(msr_sequence_frames, dim=0) # [fc, H, W, 3]
+            msr_video_mask = torch.cat(msr_sequence_masks, dim=2) # [1, 1, fc, H, W]
 
             num_frames_to_keep = ((msr_video.shape[0] - 1) // time_scale_factor) * time_scale_factor + 1
             msr_video = msr_video[:num_frames_to_keep]
+            msr_video_mask = msr_video_mask[:, :, :num_frames_to_keep, :, :]
 
             msr_image_out, msr_guide_latent = iclora_mod.LTXAddVideoICLoRAGuide.encode(
                 vae=vae, latent_width=latent_width, latent_height=latent_height, images=msr_video,
@@ -521,38 +411,38 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
             # Физически приклеиваем MSR-видео к латенту для сохранения баланса временных координат
             positive, negative, latent_image, noise_mask = nodes_lt.LTXVAddGuide.append_keyframe(
                 positive, negative, 0, latent_image, noise_mask, msr_guide_latent,
-                msr_strength, scale_factors, guide_mask=msr_guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=True
+                msr_strength_1, scale_factors, guide_mask=msr_guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=True
             )
             num_appended += msr_guide_latent.shape[2]
 
-            # Register MSR attention (but DO NOT modify the latent_image with this video)
             positive = iclora_attention.append_guide_attention_entry(
                 positive, msr_tokens_added, msr_guide_orig_shape,
-                attention_strength=msr_attention_strength, attention_mask=norm_msr_mask
+                attention_strength=msr_attention_strength, attention_mask=msr_video_mask
             )
             negative = iclora_attention.append_guide_attention_entry(
                 negative, msr_tokens_added, msr_guide_orig_shape,
-                attention_strength=msr_attention_strength, attention_mask=norm_msr_mask
+                attention_strength=msr_attention_strength, attention_mask=msr_video_mask
             )
 
         # --- STEP 4: APPLY LAST FRAME (LF) ---
         if last_frame is not None:
-            num_frames_to_keep = ((last_frame.shape[0] - 1) // time_scale_factor) * time_scale_factor + 1
-            causal_fix = (num_frames_to_keep == 1)
-            
+            # We must encode the last frame as a "continuation" latent so it decodes correctly
+            # at the end of the video. If we encode it natively, it becomes a causal start latent,
+            # which causes severe glitches when injected at latent_idx > 0.
+            # To fix this, we pad the beginning with `time_scale_factor` (8) frames.
             lf_image = last_frame
-            if not causal_fix:
-                lf_image = torch.cat([lf_image[:1], lf_image], dim=0)
+            pad_frames = time_scale_factor
+            lf_image_padded = torch.cat([lf_image[0:1].repeat(pad_frames, 1, 1, 1), lf_image], dim=0)
 
-            lf_image, lf_guide_latent = iclora_mod.LTXAddVideoICLoRAGuide.encode(
-                vae=vae, latent_width=latent_width, latent_height=latent_height, images=lf_image,
+            lf_image_encoded, lf_guide_latent = iclora_mod.LTXAddVideoICLoRAGuide.encode(
+                vae=vae, latent_width=latent_width, latent_height=latent_height, images=lf_image_padded,
                 scale_factors=scale_factors, latent_downscale_factor=latent_downscale_factor,
                 crop=crop, use_tiled_encode=use_tiled_encode, tile_size=tile_size, tile_overlap=tile_overlap
             )
 
-            if not causal_fix:
-                lf_guide_latent = lf_guide_latent[:, :, 1:, :, :]
-                lf_image = lf_image[1:]
+            # Drop the causal start latent (the first latent frame corresponds to the 8 pad frames)
+            lf_guide_latent = lf_guide_latent[:, :, 1:, :, :]
+            causal_fix = False
 
             lf_guide_orig_shape = list(lf_guide_latent.shape[2:])
             lf_guide_mask = None
@@ -569,25 +459,21 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
             lf_tokens_added = lf_guide_latent.shape[2] * lf_guide_latent.shape[3] * lf_guide_latent.shape[4]
             lf_guide_len = lf_guide_latent.shape[2]
 
-            # Secure indexing formula from index calculation bugs:
             lf_latent_idx = latent_length - lf_guide_len
             lf_calculated_frame_idx = lf_latent_idx * time_scale_factor
 
             assert lf_latent_idx >= 0, "Last frame index is out of bounds."
             
-            # Store reference for lock
             lf_guide_latent_ref = lf_guide_latent
             lf_latent_idx_ref = lf_latent_idx
             lf_guide_len_ref = lf_guide_len
 
-            # Injects keyframe conditionings
             positive, negative, latent_image, noise_mask = nodes_lt.LTXVAddGuide.append_keyframe(
                 positive, negative, lf_calculated_frame_idx, latent_image, noise_mask, lf_guide_latent,
                 last_frame_strength, scale_factors, guide_mask=lf_guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=causal_fix
             )
             num_appended += lf_guide_latent.shape[2]
 
-            # Register attention
             positive = iclora_attention.append_guide_attention_entry(
                 positive, lf_tokens_added, lf_guide_orig_shape,
                 attention_strength=last_frame_attention_strength, attention_mask=norm_lf_mask
@@ -598,7 +484,6 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
             )
 
         # --- STEP 5: APPLY INPLACE LOCKS ---
-        # This ensures MSR or any other modifications don't overwrite the locked First/Last frames
         if first_frame is not None and lock_first_frame and ff_guide_latent_ref is not None:
             for i in range(lock_first_frame_len):
                 if i < latent_length:
@@ -616,4 +501,3 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
         negative = node_helpers.conditioning_set_values(negative, {"num_physically_appended_keyframes": num_appended})
 
         return io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
-
