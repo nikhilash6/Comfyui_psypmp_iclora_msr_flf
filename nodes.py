@@ -458,10 +458,10 @@ class LTXMSRICLoRAFLF(io.ComfyNode):
                 
             msr_tokens_added = msr_guide_latent.shape[2] * msr_guide_latent.shape[3] * msr_guide_latent.shape[4]
 
-            # Injects keyframe_idxs into conditioning (we discard the modified latent_image/noise_mask from this step!)
+            # Injects keyframe_idxs into conditioning (we clone the latent/mask to prevent in-place modification of the whole video)
             positive, negative, _, _ = nodes_lt.LTXVAddGuide.append_keyframe(
-                positive, negative, 0, latent_image, noise_mask, msr_guide_latent,
-                msr_strength, scale_factors, guide_mask=msr_guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=True
+                positive, negative, 0, latent_image.clone(), noise_mask.clone(), msr_guide_latent,
+                0.0, scale_factors, guide_mask=msr_guide_mask, latent_downscale_factor=latent_downscale_factor, causal_fix=True
             )
 
             # Register MSR attention (but DO NOT modify the latent_image with this video)
