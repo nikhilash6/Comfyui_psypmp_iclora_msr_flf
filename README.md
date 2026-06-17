@@ -1,5 +1,11 @@
 # 🅛🅣🅧 MSR IC-LoRA FLF (Standalone)
 
+**Version:** 0.9.4
+
+## 📝 Changelog
+* **v0.9.4:** Fixed the `ValueError: guide pre_filter_counts != keyframe grid mask length` crash. The node now correctly injects `keyframe_idxs` for the MSR video into the conditioning, utilizing a dual-chain approach where the MSR video sequence provides cross-attention guidance, while the individual MSR images are injected directly into the latent space.
+* **Credit:** The dual-chain method implementation is inspired by and based on the technique demonstrated in [this video](https://www.youtube.com/watch?v=uirABckAK4o&).
+
 A highly optimized, monolithic ComfyUI custom node that integrates **Multi-Subject Reference (MSR)**, **First Frame (FL)**, and **Last Frame (LF)** into a single, high-performance module for LTX-Video.
 
 By unifying these three features, this node permanently solves critical timeline indexing bugs, prevents memory crashes (`IndexError`), and provides perfect physical pixel preservation via hard-locking mechanisms (Inplace-locking) on the noise mask.
