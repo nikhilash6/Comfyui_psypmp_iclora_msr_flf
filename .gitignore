@@ -1,0 +1,14 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Custom batch files and scripts
+*.bat
+*.cmd
+*.sh
+git_push.bat

@@ -36,6 +36,15 @@ By unifying these three features, this node permanently solves critical timeline
   ```
   This physically locks the starting and ending pixels in place, while IC-LoRA's cross-attention seamlessly blends the motion across the remaining timeline without visible seams.
 
+### 3. The LTX-Video MSR Temporal Coordinate Alignment Bug (Fixed in v0.9.5)
+* **The Issue:** In the previous implementation of MSR attention (Cross-Attention), a virtual sequence of frames (e.g., 41 frames) was generated and passed to `append_keyframe` on Step 3 to register its RoPE coordinates in the conditioning. However, the returned physical latent tensor and noise mask were discarded (using `positive, negative, _, _ = append_keyframe(...)`) to prevent "polluting" the main video with reference images.
+* **The Core Physics of the Bug:** Inside the LTX-Video core model (`comfy/ldm/lightricks/model.py`), keyframe positioning relies on a strict offset from the end of the physical latent sequence:
+  $$\text{Token Slice} = -K$$
+  where $K$ is the total number of registered keyframes in the conditioning (including FF, MSR sequences, and LF). 
+  If we register 13 keyframes (1 FF + 5 MSR-img + 6 MSR-vid + 1 LF) but physically append only 7, the sampler core overwrites the temporal coordinates of the last 13 tokens. This causes the model to invade the main generated video **6 frames deep** (pixels 313–360) and assign them a temporal coordinate of $t = 0$.
+* **The Symptoms:** The motion completely collapses near the end of the video, moving backward, freezing, or degenerating into chaotic noise. The temporal connection to the locked Last Frame (at $t=360$) is severed, rendering `lock_last_frame` visually non-functional.
+* **The Solution:** We resolved this by preserving the returned `latent_image` and `noise_mask` from the `append_keyframe` call in Step 3 and incrementing the `num_appended` counter accordingly. All 13 appended frames are now kept physically in sync with RoPE coordinates during sampling, and our patched `LTXVCropGuides` cleanly chops them off at the end of execution, yielding a perfect final frame lock and seamless end-of-video motion.
+
 ---
 
 ## 🌟 Key Features
